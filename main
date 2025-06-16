@@ -6,12 +6,29 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 load_dotenv()
 
-# Аутентификация в GigaChat (как в предыдущем примере)
 def get_gigachat_token():
-    # ... (код из первого примера) ...
+    url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+    headers = {
+        "Authorization": f"Basic {os.getenv('GIGACHAT_CLIENT_ID')}:{os.getenv('GIGACHAT_CLIENT_SECRET')}",
+        "RqUID": "123456789",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    data = {"scope": "GIGACHAT_API_PERS"}
+    response = requests.post(url, headers=headers, data=data, verify=False)
+    return response.json().get("access_token")
 
 def ask_gigachat(prompt, token):
-    # ... (код из первого примера) ...
+    url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "GigaChat-Pro",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    response = requests.post(url, headers=headers, json=data, verify=False)
+    return response.json().get("choices", [{}])[0].get("message", {}).get("content", "Ошибка")
 
 async def start(update: Update, context):
     await update.message.reply_text("Привет! Я бот на базе GigaChat. Задайте вопрос.")
