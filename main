@@ -1,0 +1,33 @@
+import os
+from dotenv import load_dotenv
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+
+load_dotenv()
+
+# Аутентификация в GigaChat (как в предыдущем примере)
+def get_gigachat_token():
+    # ... (код из первого примера) ...
+
+def ask_gigachat(prompt, token):
+    # ... (код из первого примера) ...
+
+async def start(update: Update, context):
+    await update.message.reply_text("Привет! Я бот на базе GigaChat. Задайте вопрос.")
+
+async def handle_message(update: Update, context):
+    token = get_gigachat_token()
+    response = ask_gigachat(update.message.text, token)
+    await update.message.reply_text(response)
+
+def main():
+    app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
