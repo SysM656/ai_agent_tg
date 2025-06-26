@@ -3,11 +3,6 @@
 
 """
 Модернизированный Telegram-бот с интеграцией GigaChat API и RAG-функционалом
-Дополнительные требования:
-- chromadb
-- sentence-transformers
-- pypdf (для обработки PDF)
-- python-docx (для обработки DOCX)
 """
 
 import os
@@ -16,7 +11,6 @@ import tempfile
 from typing import Optional, List, Dict
 from pathlib import Path
 
-from dotenv import load_dotenv
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
 from telegram import Update
@@ -40,8 +34,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Загрузка переменных окружения
-load_dotenv()
+# Указываем GIGACHAT_CREDENTIALS прямо в коде
+GIGACHAT_CREDENTIALS = "your_gigachat_credentials_here"  # Замените на реальные данные
+TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"  # Замените на реальный токен
+ALLOWED_USERS = ["123456789"]  # Замените на ID пользователей, которым разрешена загрузка файлов
 
 class DocumentProcessor:
     """Класс для обработки загруженных документов"""
@@ -92,7 +88,6 @@ class VectorDB:
     
     def add_document(self, document_id: str, text: str, metadata: Dict = None) -> None:
         """Добавление документа в векторную БД"""
-        # Разбиваем текст на чанки (можно доработать для более умного разделения)
         chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
         ids = [f"{document_id}_{i}" for i in range(len(chunks))]
         
@@ -119,23 +114,17 @@ class GigaChatClient:
     
     def _configure_client(self) -> GigaChat:
         """Конфигурация клиента GigaChat"""
-        credentials = os.getenv("GIGACHAT_CREDENTIALS")
-        if not credentials:
-            raise ValueError("GIGACHAT_CREDENTIALS должен быть установлен в .env файле")
-        
         return GigaChat(
-            credentials=credentials,
+            credentials=GIGACHAT_CREDENTIALS,  # Используем переменную из кода
             verify_ssl_certs=True
         )
     
     def send_message(self, prompt: str) -> Optional[str]:
         """Отправка сообщения в GigaChat API с предварительным поиском в документах"""
         try:
-            # Поиск релевантных фрагментов в документах
             relevant_docs = self.vector_db.query(prompt)
             context = "\n\n".join(relevant_docs)
             
-            # Формируем промт с контекстом
             system_message = Messages(
                 role=MessagesRole.SYSTEM,
                 content=f"Ты - помощник компании. Отвечай на вопросы, используя только предоставленную информацию:\n\n{context}"
@@ -148,7 +137,7 @@ class GigaChatClient:
             
             chat = Chat(
                 messages=[system_message, user_message],
-                temperature=0.3,  # Уменьшаем температуру для более точных ответов
+                temperature=0.3,
                 max_tokens=1000
             )
             
@@ -163,27 +152,22 @@ class TelegramBot:
     """Telegram бот с интеграцией GigaChat и загрузкой документов"""
     
     def __init__(self):
-        self.token = os.getenv("TELEGRAM_BOT_TOKEN")
-        if not self.token:
-            raise ValueError("TELEGRAM_BOT_TOKEN должен быть установлен в .env файле")
-        
+        self.token = TELEGRAM_BOT_TOKEN  # Используем переменную из кода
         self.vector_db = VectorDB()
         self.gigachat = GigaChatClient(self.vector_db)
         self.application = self._configure_application()
-        self.allowed_users = os.getenv("ALLOWED_USERS", "").split(",")
+        self.allowed_users = ALLOWED_USERS  # Используем переменную из кода
     
     def _configure_application(self) -> Application:
         """Конфигурация Telegram бота с обработчиками"""
         app = ApplicationBuilder().token(self.token).build()
         
-        # Регистрация обработчиков
         app.add_handler(CommandHandler("start", self.start_command))
         app.add_handler(CommandHandler("help", self.help_command))
         app.add_handler(CommandHandler("upload", self.upload_command))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
         
-        # Обработчики ошибок
         app.add_error_handler(self.error_handler)
         
         return app
@@ -231,7 +215,6 @@ class TelegramBot:
         document = update.message.document
         file_name = document.file_name
         
-        # Проверяем формат файла
         if not file_name.lower().endswith(('.pdf', '.docx', '.txt')):
             await update.message.reply_text(
                 "Неподдерживаемый формат файла. Пожалуйста, отправьте PDF, DOCX или TXT."
@@ -243,10 +226,8 @@ class TelegramBot:
                 file = await context.bot.get_file(document.file_id)
                 await file.download_to_drive(temp_file.name)
                 
-                # Извлекаем текст из файла
                 text = DocumentProcessor.extract_text_from_file(temp_file.name)
                 
-                # Добавляем в векторную БД
                 self.vector_db.add_document(
                     document_id=file_name,
                     text=text,
@@ -278,7 +259,6 @@ class TelegramBot:
         await update.message.chat.send_action(action="typing")
         
         try:
-            # Отправляем запрос в GigaChat с контекстом из документов
             response = self.gigachat.send_message(user_message)
             if not response:
                 raise ValueError("Пустой ответ от GigaChat API")
@@ -305,22 +285,8 @@ class TelegramBot:
         logger.info("Бот запущен")
         self.application.run_polling(drop_pending_updates=True)
 
-def validate_environment() -> None:
-    """Проверка необходимых переменных окружения"""
-    required_vars = [
-        "TELEGRAM_BOT_TOKEN",
-        "GIGACHAT_CREDENTIALS"
-    ]
-    
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    if missing_vars:
-        raise EnvironmentError(
-            f"Отсутствуют обязательные переменные окружения: {', '.join(missing_vars)}"
-        )
-
 if __name__ == "__main__":
     try:
-        validate_environment()
         bot = TelegramBot()
         bot.run()
     except Exception as e:
