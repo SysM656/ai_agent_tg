@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Модернизированный Telegram-бот с интеграцией GigaChat API и RAG-функционалом
-"""
-
 import os
 import logging
 import tempfile
-from typing import Optional, List, Dict
+from datetime import datetime
 from pathlib import Path
+from typing import Optional, List, Dict, Any
 
 from gigachat import GigaChat
 from gigachat.models import Chat, Messages, MessagesRole
@@ -26,108 +23,245 @@ from chromadb import Client, Settings
 from chromadb.utils import embedding_functions
 import PyPDF2
 from docx import Document
+from nltk.tokenize import sent_tokenize
 
-# Настройка логирования
+# Настройка комплексного логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler("bot_operations.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Указываем GIGACHAT_CREDENTIALS прямо в коде
-GIGACHAT_CREDENTIALS = "your_gigachat_credentials_here"  # Замените на реальные данные
-TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"  # Замените на реальный токен
-ALLOWED_USERS = ["123456789"]  # Замените на ID пользователей, которым разрешена загрузка файлов
+# Полная конфигурация приложения
+class AppConfig:
+    GIGACHAT_CREDENTIALS = "NTgyMGY4NzMtZGIwNC00M2Q4LWJlZjYtMDc0NjJlODkyYmIxOjNhNDA3OWQ5LTQyMWItNDUwNC1hMDc5LTJlYmFkN2YxYzczNg=="
+    TELEGRAM_BOT_TOKEN = "7647434273:AAG3YquAD-hvASUJl9i7vkBYAyVih8jWJbE"
+    ALLOWED_USERS = ["123456789"]
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+    CHUNK_SIZE = 1000
+    PERSIST_DIRECTORY = "./chroma_db"
+    EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 class DocumentProcessor:
-    """Класс для обработки загруженных документов"""
+    """Полноценный процессор документов с обработкой ошибок"""
     
     @staticmethod
     def extract_text_from_file(file_path: str) -> str:
-        """Извлечение текста из файла в зависимости от типа"""
-        ext = Path(file_path).suffix.lower()
-        
-        if ext == '.pdf':
-            return DocumentProcessor._extract_from_pdf(file_path)
-        elif ext == '.docx':
-            return DocumentProcessor._extract_from_docx(file_path)
-        elif ext == '.txt':
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        else:
-            raise ValueError(f"Неподдерживаемый формат файла: {ext}")
-    
+        """Исчерпывающая реализация извлечения текста"""
+        try:
+            ext = Path(file_path).suffix.lower()
+            
+            if ext == '.pdf':
+                return DocumentProcessor._extract_from_pdf(file_path)
+            elif ext == '.docx':
+                return DocumentProcessor._extract_from_docx(file_path)
+            elif ext == '.txt':
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    if not content.strip():
+                        raise ValueError("Текстовый файл пуст")
+                    return content
+            else:
+                raise ValueError(f"Неподдерживаемый формат файла: {ext}")
+        except Exception as e:
+            logger.error(f"Ошибка извлечения текста: {str(e)}")
+            raise
+
     @staticmethod
     def _extract_from_pdf(file_path: str) -> str:
-        """Извлечение текста из PDF"""
-        text = ""
-        with open(file_path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            for page in reader.pages:
-                text += page.extract_text() + "\n"
-        return text
-    
+        """Полная реализация обработки PDF"""
+        full_text = []
+        try:
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                if len(reader.pages) == 0:
+                    raise ValueError("PDF не содержит страниц")
+                
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        full_text.append(text)
+                
+                if not full_text:
+                    raise ValueError("Не удалось извлечь текст из PDF")
+                
+                return "\n".join(full_text)
+        except Exception as e:
+            logger.error(f"PDF обработка ошибки: {str(e)}")
+            raise
+
     @staticmethod
     def _extract_from_docx(file_path: str) -> str:
-        """Извлечение текста из DOCX"""
-        doc = Document(file_path)
-        return "\n".join([para.text for para in doc.paragraphs])
+        """Исчерпывающая реализация обработки DOCX"""
+        full_text = []
+        try:
+            doc = Document(file_path)
+            if not doc.paragraphs and not doc.tables:
+                raise ValueError("DOCX файл не содержит содержимого")
+            
+            # Обработка параграфов
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    full_text.append(para.text)
+            
+            # Обработка таблиц
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            full_text.append(cell.text)
+            
+            if not full_text:
+                raise ValueError("Не удалось извлечь текст из DOCX")
+            
+            return "\n".join(full_text)
+        except Exception as e:
+            logger.error(f"DOCX обработка ошибки: {str(e)}")
+            raise
 
 class VectorDB:
-    """Класс для работы с векторной базой данных"""
+    """Полнофункциональная обертка для ChromaDB"""
     
     def __init__(self):
-        self.client = Client(settings=Settings(persist_directory="./chroma_db"))
+        self.client = Client(settings=Settings(
+            persist_directory=AppConfig.PERSIST_DIRECTORY,
+            anonymized_telemetry=False
+        ))
         self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            model_name=AppConfig.EMBEDDING_MODEL
         )
-        self.collection = self.client.get_or_create_collection(
-            name="company_documents",
-            embedding_function=self.embedding_function
-        )
-    
-    def add_document(self, document_id: str, text: str, metadata: Dict = None) -> None:
-        """Добавление документа в векторную БД"""
-        chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
-        ids = [f"{document_id}_{i}" for i in range(len(chunks))]
-        
-        self.collection.add(
-            documents=chunks,
-            ids=ids,
-            metadatas=metadata if metadata else {}
-        )
-    
+        self.collection = self._initialize_collection()
+
+    def _initialize_collection(self):
+        """Полная инициализация коллекции с обработкой ошибок"""
+        try:
+            return self.client.get_or_create_collection(
+                name="company_documents",
+                embedding_function=self.embedding_function,
+                metadata={"hnsw:space": "cosine"}
+            )
+        except Exception as e:
+            logger.error(f"Ошибка инициализации коллекции: {str(e)}")
+            raise
+
+    def add_document(self, document_id: str, text: str, metadata: Dict[str, Any] = None) -> None:
+        """Исчерпывающая реализация добавления документа"""
+        try:
+            if not text or not isinstance(text, str):
+                raise ValueError("Текст документа должен быть непустой строкой")
+            
+            # Улучшенный чанкинг по предложениям
+            sentences = sent_tokenize(text)
+            chunks = []
+            current_chunk = ""
+            
+            for sentence in sentences:
+                if len(current_chunk) + len(sentence) <= AppConfig.CHUNK_SIZE:
+                    current_chunk += " " + sentence
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = sentence
+            
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+
+            if not chunks:
+                raise ValueError("Не удалось разбить текст на чанки")
+            
+            # Подготовка метаданных
+            base_metadata = metadata.copy() if metadata else {}
+            metadatas = []
+            ids = []
+            
+            for i, chunk in enumerate(chunks):
+                chunk_meta = base_metadata.copy()
+                chunk_meta.update({
+                    "chunk_id": i,
+                    "total_chunks": len(chunks),
+                    "document_id": document_id,
+                    "timestamp": datetime.now().isoformat()
+                })
+                metadatas.append(chunk_meta)
+                ids.append(f"{document_id}_{i}")
+            
+            # Вставка в коллекцию
+            self.collection.add(
+                documents=chunks,
+                ids=ids,
+                metadatas=metadatas
+            )
+            
+            logger.info(f"Документ {document_id} добавлен ({len(chunks)} чанков)")
+        except Exception as e:
+            logger.error(f"Ошибка добавления документа: {str(e)}", exc_info=True)
+            raise
+
     def query(self, query_text: str, n_results: int = 3) -> List[str]:
-        """Поиск релевантных фрагментов в документах"""
-        results = self.collection.query(
-            query_texts=[query_text],
-            n_results=n_results
-        )
-        return results['documents'][0]
+        """Полноценная реализация поиска"""
+        try:
+            if not query_text or not isinstance(query_text, str):
+                raise ValueError("Поисковый запрос должен быть непустой строкой")
+            
+            results = self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results,
+                include=["documents", "metadatas", "distances"]
+            )
+            
+            logger.debug(f"Результаты поиска: {results}")
+            return results['documents'][0]
+        except Exception as e:
+            logger.error(f"Ошибка поиска: {str(e)}")
+            raise
 
 class GigaChatClient:
-    """Клиент для работы с GigaChat API с RAG-функционалом"""
+    """Полнофункциональный клиент GigaChat с обработкой ошибок"""
     
     def __init__(self, vector_db: VectorDB):
-        self.client = self._configure_client()
         self.vector_db = vector_db
-    
-    def _configure_client(self) -> GigaChat:
-        """Конфигурация клиента GigaChat"""
-        return GigaChat(
-            credentials=GIGACHAT_CREDENTIALS,  # Используем переменную из кода
-            verify_ssl_certs=True
-        )
-    
-    def send_message(self, prompt: str) -> Optional[str]:
-        """Отправка сообщения в GigaChat API с предварительным поиском в документах"""
+        self.client = self._initialize_client()
+
+    def _initialize_client(self) -> GigaChat:
+        """Исчерпывающая инициализация клиента"""
         try:
-            relevant_docs = self.vector_db.query(prompt)
-            context = "\n\n".join(relevant_docs)
+            return GigaChat(
+                credentials=AppConfig.GIGACHAT_CREDENTIALS,
+                verify_ssl_certs=True,
+                timeout=30
+            )
+        except Exception as e:
+            logger.error(f"Ошибка инициализации GigaChat: {str(e)}")
+            raise
+
+    def send_message(self, prompt: str) -> Optional[str]:
+        """Полноценная реализация отправки сообщения с RAG"""
+        try:
+            if not prompt or not isinstance(prompt, str):
+                raise ValueError("Промпт должен быть непустой строкой")
             
+            # Полноценный поиск в базе знаний
+            relevant_docs = self.vector_db.query(prompt)
+            if not relevant_docs:
+                raise ValueError("Не найдено релевантных документов")
+            
+            context = "\n\n".join([
+                f"Источник {i+1}:\n{doc}" 
+                for i, doc in enumerate(relevant_docs)
+            ])
+            
+            # Детальный промт с контекстом
             system_message = Messages(
                 role=MessagesRole.SYSTEM,
-                content=f"Ты - помощник компании. Отвечай на вопросы, используя только предоставленную информацию:\n\n{context}"
+                content=f"""Ты - помощник компании. Отвечай строго на основе предоставленной информации:
+                
+{context}
+
+Если информация не найдена в предоставленных данных, скажи "Не могу ответить на основании имеющихся данных"."""
             )
             
             user_message = Messages(
@@ -138,157 +272,270 @@ class GigaChatClient:
             chat = Chat(
                 messages=[system_message, user_message],
                 temperature=0.3,
-                max_tokens=1000
+                max_tokens=2000,
+                top_p=0.9
             )
             
             response = self.client.chat(chat)
             return response.choices[0].message.content
             
         except Exception as e:
-            logger.error(f"Ошибка GigaChat API: {str(e)}")
-            return None
+            logger.error(f"Ошибка GigaChat API: {str(e)}", exc_info=True)
+            raise
 
 class TelegramBot:
-    """Telegram бот с интеграцией GigaChat и загрузкой документов"""
+    """Полностью реализованный Telegram бот"""
     
     def __init__(self):
-        self.token = TELEGRAM_BOT_TOKEN  # Используем переменную из кода
+        self.token = AppConfig.TELEGRAM_BOT_TOKEN
         self.vector_db = VectorDB()
         self.gigachat = GigaChatClient(self.vector_db)
         self.application = self._configure_application()
-        self.allowed_users = ALLOWED_USERS  # Используем переменную из кода
-    
+
     def _configure_application(self) -> Application:
-        """Конфигурация Telegram бота с обработчиками"""
+        """Полная конфигурация приложения Telegram"""
         app = ApplicationBuilder().token(self.token).build()
         
-        app.add_handler(CommandHandler("start", self.start_command))
-        app.add_handler(CommandHandler("help", self.help_command))
-        app.add_handler(CommandHandler("upload", self.upload_command))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-        app.add_handler(MessageHandler(filters.Document.ALL, self.handle_document))
+        # Комплексная регистрация обработчиков
+        handlers = [
+            CommandHandler("start", self.start_command),
+            CommandHandler("help", self.help_command),
+            CommandHandler("upload", self.upload_command),
+            CommandHandler("db_status", self.db_status_command),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message),
+            MessageHandler(filters.Document.ALL, self.handle_document)
+        ]
+        
+        for handler in handlers:
+            app.add_handler(handler)
         
         app.add_error_handler(self.error_handler)
-        
         return app
-    
+
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /start"""
-        await update.message.reply_text(
-            "Привет! Я интеллектуальный бот компании.\n\n"
-            "Я могу отвечать на вопросы, используя внутренние инструкции компании.\n\n"
-            "Доступные команды:\n"
-            "/help - показать справку\n"
-            "/upload - загрузить документ (только для админов)"
-        )
-    
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /help"""
-        await update.message.reply_text(
-            "Доступные команды:\n"
-            "/start - начать диалог\n"
-            "/help - показать справку\n"
-            "/upload - загрузить документ (только для админов)\n\n"
-            "Просто напишите мне вопрос, и я отвечу на основе документов компании!"
-        )
-    
-    async def upload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик команды /upload"""
-        user_id = str(update.message.from_user.id)
-        
-        if user_id not in self.allowed_users:
-            await update.message.reply_text("У вас нет прав для загрузки документов.")
-            return
-        
-        await update.message.reply_text(
-            "Пожалуйста, отправьте документ (PDF, DOCX или TXT), который нужно добавить в базу знаний."
-        )
-    
-    async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик загрузки документов"""
-        user_id = str(update.message.from_user.id)
-        
-        if user_id not in self.allowed_users:
-            await update.message.reply_text("У вас нет прав для загрузки документов.")
-            return
-        
-        document = update.message.document
-        file_name = document.file_name
-        
-        if not file_name.lower().endswith(('.pdf', '.docx', '.txt')):
-            await update.message.reply_text(
-                "Неподдерживаемый формат файла. Пожалуйста, отправьте PDF, DOCX или TXT."
-            )
-            return
-        
+        """Полноценная обработка команды /start"""
         try:
-            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-                file = await context.bot.get_file(document.file_id)
-                await file.download_to_drive(temp_file.name)
-                
-                text = DocumentProcessor.extract_text_from_file(temp_file.name)
-                
-                self.vector_db.add_document(
-                    document_id=file_name,
-                    text=text,
-                    metadata={"uploaded_by": user_id, "filename": file_name}
-                )
-                
-                await update.message.reply_text(
-                    f"Документ {file_name} успешно добавлен в базу знаний!"
-                )
-                
+            response = (
+                "🔹 Интеллектуальный помощник компании 🔹\n\n"
+                "Я могу отвечать на вопросы, используя внутренние документы компании.\n\n"
+                "Доступные команды:\n"
+                "/help - справка по командам\n"
+                "/upload - загрузить документ (только для админов)\n"
+                "/db_status - статистика базы знаний\n\n"
+                "Просто задайте вопрос, и я отвечу на основе документов компании!"
+            )
+            await update.message.reply_text(response)
         except Exception as e:
-            logger.error(f"Ошибка обработки документа: {str(e)}")
-            await update.message.reply_text(
-                "Произошла ошибка при обработке документа. Пожалуйста, попробуйте позже."
-            )
-        finally:
-            if 'temp_file' in locals() and temp_file.name:
-                try:
-                    os.unlink(temp_file.name)
-                except:
-                    pass
-    
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обработчик текстовых сообщений с RAG"""
-        user_message = update.message.text
-        user_id = update.message.from_user.id
-        logger.info(f"Получено сообщение от {user_id}: {user_message}")
-        
-        await update.message.chat.send_action(action="typing")
-        
+            logger.error(f"Ошибка start_command: {str(e)}")
+            await update.message.reply_text("Произошла ошибка при обработке команды")
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Исчерпывающая обработка команды /help"""
         try:
+            help_text = (
+                "📚 Справка по командам бота:\n\n"
+                "/start - начать работу с ботом\n"
+                "/help - показать это сообщение\n"
+                "/upload - загрузить документ в базу знаний (PDF, DOCX, TXT)\n"
+                "/db_status - показать статистику базы знаний\n\n"
+                "Просто напишите ваш вопрос, и я отвечу на основе документов компании!"
+            )
+            await update.message.reply_text(help_text)
+        except Exception as e:
+            logger.error(f"Ошибка help_command: {str(e)}")
+            await update.message.reply_text("Произошла ошибка при обработке команды")
+
+    async def upload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Полноценная обработка команды /upload"""
+        try:
+            user_id = str(update.message.from_user.id)
+            if user_id not in AppConfig.ALLOWED_USERS:
+                await update.message.reply_text("❌ У вас нет прав для загрузки документов.")
+                return
+            
+            await update.message.reply_text(
+                "📤 Пожалуйста, отправьте документ (PDF, DOCX или TXT) для добавления в базу знаний.\n\n"
+                "Максимальный размер файла: 10 МБ"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка upload_command: {str(e)}")
+            await update.message.reply_text("Произошла ошибка при обработке команды")
+
+    async def db_status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Полная реализация команды статуса базы данных"""
+        try:
+            count = self.vector_db.collection.count()
+            await update.message.reply_text(
+                f"📊 Статус базы знаний:\n"
+                f"Документов: {count}\n"
+                f"Размер: {self._get_db_size()} МБ"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка db_status_command: {str(e)}")
+            await update.message.reply_text("Произошла ошибка при получении статуса")
+
+    def _get_db_size(self) -> float:
+        """Полноценный расчет размера базы данных"""
+        try:
+            size_bytes = sum(
+                f.stat().st_size for f in 
+                Path(AppConfig.PERSIST_DIRECTORY).glob('**/*') 
+                if f.is_file()
+            )
+            return round(size_bytes / (1024 * 1024), 2)
+        except Exception as e:
+            logger.error(f"Ошибка расчета размера БД: {str(e)}")
+            return 0.0
+
+    async def handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Исчерпывающая обработка загружаемых документов"""
+        temp_path = None
+        try:
+            user_id = str(update.message.from_user.id)
+            if user_id not in AppConfig.ALLOWED_USERS:
+                await update.message.reply_text("❌ У вас нет прав для загрузки документов.")
+                return
+
+            document = update.message.document
+            file_name = document.file_name or "unnamed_file"
+            file_size = document.file_size or 0
+
+            # Полная проверка файла
+            if file_size > AppConfig.MAX_FILE_SIZE:
+                raise ValueError(f"Файл слишком большой (максимум {AppConfig.MAX_FILE_SIZE//1024//1024} МБ)")
+
+            if not file_name.lower().endswith(('.pdf', '.docx', '.txt')):
+                raise ValueError("Поддерживаются только PDF, DOCX и TXT файлы")
+
+            # Создание временного файла с правильным расширением
+            suffix = Path(file_name).suffix
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+                temp_path = temp_file.name
+
+            # Полноценная загрузка файла
+            await (await context.bot.get_file(document.file_id)).download_to_drive(temp_path)
+
+            # Проверка размера скачанного файла
+            actual_size = os.path.getsize(temp_path)
+            if actual_size != file_size:
+                logger.warning(f"Размер файла не совпадает: ожидалось {file_size}, получено {actual_size}")
+
+            # Извлечение текста
+            text = DocumentProcessor.extract_text_from_file(temp_path)
+            if not text.strip():
+                raise ValueError("Файл не содержит текста или не может быть прочитан")
+
+            # Подготовка метаданных
+            metadata = {
+                "uploaded_by": user_id,
+                "filename": file_name,
+                "file_size": file_size,
+                "timestamp": datetime.now().isoformat(),
+                "source": "telegram_upload"
+            }
+
+            # Добавление в базу знаний
+            self.vector_db.add_document(
+                document_id=file_name,
+                text=text,
+                metadata=metadata
+            )
+
+            await update.message.reply_text(
+                f"✅ Документ {file_name} успешно добавлен в базу знаний!\n"
+                f"Размер: {file_size//1024} КБ\n"
+                f"Символов: {len(text)}"
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки документа: {str(e)}", exc_info=True)
+            error_msg = (
+                f"❌ Ошибка обработки файла:\n"
+                f"Имя: {file_name}\n"
+                f"Тип: {document.mime_type if document else 'неизвестен'}\n"
+                f"Ошибка: {str(e)}"
+            )
+            await update.message.reply_text(error_msg[:4000])  # Ограничение длины сообщения Telegram
+
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception as e:
+                    logger.error(f"Ошибка удаления временного файла: {str(e)}")
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Полноценная обработка текстовых сообщений"""
+        try:
+            user_message = update.message.text
+            user_id = update.message.from_user.id
+            
+            logger.info(f"Получен запрос от {user_id}: {user_message[:100]}...")
+            
+            await update.message.chat.send_action(action="typing")
+            
             response = self.gigachat.send_message(user_message)
             if not response:
-                raise ValueError("Пустой ответ от GigaChat API")
+                raise ValueError("Не получен ответ от GigaChat")
             
-            await update.message.reply_text(response)
+            await update.message.reply_text(response[:4000])  # Ограничение длины Telegram
             
         except Exception as e:
-            logger.error(f"Ошибка обработки сообщения: {str(e)}")
+            logger.error(f"Ошибка обработки сообщения: {str(e)}", exc_info=True)
             await update.message.reply_text(
-                "Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
+                "⚠ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже."
             )
-    
+
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Глобальный обработчик ошибок"""
-        logger.error(f"Ошибка в боте: {context.error}", exc_info=context.error)
+        """Полноценный обработчик ошибок"""
+        error = context.error
+        logger.critical(f"Критическая ошибка: {str(error)}", exc_info=error)
         
         if isinstance(update, Update):
             await update.message.reply_text(
-                "Произошла критическая ошибка. Разработчики уже уведомлены."
+                "⚠ Произошла критическая ошибка. Разработчики уже уведомлены.\n"
+                "Пожалуйста, попробуйте позже или обратитесь в поддержку."
             )
-    
+
     def run(self) -> None:
-        """Запуск бота"""
-        logger.info("Бот запущен")
-        self.application.run_polling(drop_pending_updates=True)
+        """Полноценный запуск бота"""
+        logger.info("Запуск бота...")
+        try:
+            self.application.run_polling(
+                drop_pending_updates=True,
+                close_loop=False,
+                stop_signals=None
+            )
+        except Exception as e:
+            logger.critical(f"Ошибка запуска бота: {str(e)}", exc_info=e)
+            raise
 
 if __name__ == "__main__":
+    """Полная точка входа приложения"""
+        # Проверка необходимых модулей
+    required_modules = [
+            'gigachat', 'telegram', 'chromadb', 
+            'PyPDF2', 'python-docx', 'nltk'
+        ]
+        
+    import importlib
+    for module in required_modules:
+            importlib.import_module(module)
+        
+        # Инициализация NLTK
     try:
-        bot = TelegramBot()
-        bot.run()
+            import nltk
+            nltk.download('punkt', quiet=True)
     except Exception as e:
-        logger.critical(f"Критическая ошибка при запуске бота: {str(e)}", exc_info=True)
-        raise
+            logger.warning(f"Ошибка загрузки NLTK данных: {str(e)}")
+        
+        # Запуск бота
+    bot = TelegramBot()
+    bot.run()
+        
+    '''except ImportError as e:
+        logger.critical(f"Отсутствует обязательная зависимость: {str(e)}")
+        print(f"Ошибка: {str(e)}\nУстановите недостающие пакеты: pip install {' '.join(required_modules)}")
+    except Exception as e:
+        logger.critical(f"Фатальная ошибка: {str(e)}", exc_info=e)
+        print(f"Фатальная ошибка: {str(e)}")'''
