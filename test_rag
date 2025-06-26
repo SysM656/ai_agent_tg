@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 # Полная конфигурация приложения
 class AppConfig:
-    GIGACHAT_CREDENTIALS = "NTgyMGY4NzMtZGIwNC00M2Q4LWJlZjYtMDc0NjJlODkyYmIxOjNhNDA3OWQ5LTQyMWItNDUwNC1hMDc5LTJlYmFkN2YxYzczNg=="
-    TELEGRAM_BOT_TOKEN = "7647434273:AAG3YquAD-hvASUJl9i7vkBYAyVih8jWJbE"
+    GIGACHAT_CREDENTIALS = ""
+    TELEGRAM_BOT_TOKEN = ""
     ALLOWED_USERS = ["123456789"]
     MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
     CHUNK_SIZE = 1000
